@@ -497,7 +497,7 @@ nfs | dir)
 btrfs)
   DISK_EXT=".raw"
   DISK_REF="$VMID/"
-  DISK_IMPORT="-format raw"
+  DISK_IMPORT="--format raw"
   FORMAT=",efitype=4m"
   THIN=""
   ;;
