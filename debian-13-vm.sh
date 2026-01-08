@@ -3,6 +3,14 @@
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+#
+# FIXED FULL VERSION for TW202423-art/testsh
+# Fixes:
+# - Advanced mode no longer "disappears" due to uninitialized vars (set -e)
+# - qm importdisk format args passed correctly for NFS/DIR/BTRFS
+# - Initialize STORAGE_MENU and MSG_MAX_LENGTH
+# - Do not swallow qm importdisk errors
+# - Safer cleanup/popd
 
 source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
 
@@ -19,6 +27,7 @@ EOF
 }
 header_info
 echo -e "\n Loading..."
+
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
@@ -34,7 +43,6 @@ GN=$(echo "\033[1;92m")
 DGN=$(echo "\033[32m")
 CL=$(echo "\033[m")
 
-CL=$(echo "\033[m")
 BOLD=$(echo "\033[1m")
 BFR="\\r\\033[K"
 HOLD=" "
@@ -60,11 +68,13 @@ ADVANCED="${TAB}🧩${TAB}${CL}"
 CLOUD="${TAB}☁️${TAB}${CL}"
 
 THIN="discard=on,ssd=1,"
+
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
 trap 'post_update_to_api "failed" "INTERRUPTED"' SIGINT
 trap 'post_update_to_api "failed" "TERMINATED"' SIGTERM
+
 function error_handler() {
   local exit_code="$?"
   local line_number="$1"
@@ -93,20 +103,21 @@ function get_valid_nextid() {
 }
 
 function cleanup_vmid() {
-  if qm status "$VMID" &>/dev/null; then
-    qm stop "$VMID" &>/dev/null
-    qm destroy "$VMID" &>/dev/null
+  if qm status "${VMID:-}" &>/dev/null; then
+    qm stop "$VMID" &>/dev/null || true
+    qm destroy "$VMID" &>/dev/null || true
   fi
 }
 
 function cleanup() {
-  popd >/dev/null
+  popd >/dev/null || true
   post_update_to_api "done" "none"
-  rm -rf "$TEMP_DIR"
+  rm -rf "${TEMP_DIR:-}"
 }
 
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
+
 if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Debian 13 VM" --yesno "This will create a New Debian 13 VM. Proceed?" 10 58; then
   :
 else
@@ -138,13 +149,11 @@ function check_root() {
   fi
 }
 
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
 # Supported: Proxmox VE 8.0.x – 8.9.x, 9.0 and 9.1
 pve_check() {
   local PVE_VER
   PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
 
-  # Check for Proxmox VE 8.x: allow 8.0–8.9
   if [[ "$PVE_VER" =~ ^8\.([0-9]+) ]]; then
     local MINOR="${BASH_REMATCH[1]}"
     if ((MINOR < 0 || MINOR > 9)); then
@@ -155,7 +164,6 @@ pve_check() {
     return 0
   fi
 
-  # Check for Proxmox VE 9.x: allow 9.0 and 9.1
   if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
     local MINOR="${BASH_REMATCH[1]}"
     if ((MINOR < 0 || MINOR > 1)); then
@@ -166,7 +174,6 @@ pve_check() {
     return 0
   fi
 
-  # All other unsupported versions
   msg_error "This version of Proxmox VE is not supported."
   msg_error "Supported versions: Proxmox VE 8.0 – 8.x or 9.0 – 9.1"
   exit 1
@@ -174,8 +181,8 @@ pve_check() {
 
 function arch_check() {
   if [ "$(dpkg --print-architecture)" != "amd64" ]; then
-    echo -e "\n ${INFO}${YWB}This script will not work with PiMox! \n"
-    echo -e "\n ${YWB}Visit https://github.com/asylumexp/Proxmox for ARM64 support. \n"
+    echo -e "\n ${INFO}${YW}This script will not work with PiMox! \n"
+    echo -e "\n ${YW}Visit https://github.com/asylumexp/Proxmox for ARM64 support. \n"
     echo -e "Exiting..."
     sleep 2
     exit
@@ -218,6 +225,7 @@ function default_settings() {
   START_VM="yes"
   CLOUD_INIT="no"
   METHOD="default"
+
   echo -e "${CONTAINERID}${BOLD}${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
   echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}i440fx${CL}"
   echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
@@ -237,7 +245,25 @@ function default_settings() {
 
 function advanced_settings() {
   METHOD="advanced"
+
+  # ===== FIX: initialize defaults to prevent "set -e" crashing =====
+  : "${DISK_SIZE:=8G}"
+  : "${DISK_CACHE:=}"
+  : "${HN:=debian}"
+  : "${CPU_TYPE:=}"
+  : "${CORE_COUNT:=2}"
+  : "${RAM_SIZE:=2048}"
+  : "${BRG:=vmbr0}"
+  : "${MAC:=$GEN_MAC}"
+  : "${VLAN:=}"
+  : "${MTU:=}"
+  : "${FORMAT:=,efitype=4m}"
+  : "${MACHINE:=}"
+  : "${START_VM:=yes}"
+  : "${CLOUD_INIT:=no}"
+
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
+
   while true; do
     if VMID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Virtual Machine ID" 8 58 "$VMID" --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
       if [ -z "$VMID" ]; then
@@ -302,7 +328,7 @@ function advanced_settings() {
     exit-script
   fi
 
-  if VM_NAME=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 debian --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if VM_NAME=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "$HN" --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$VM_NAME" ]; then
       HN="debian"
       echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
@@ -329,40 +355,34 @@ function advanced_settings() {
     exit-script
   fi
 
-  if CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 2 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 "$CORE_COUNT" --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$CORE_COUNT" ]; then
       CORE_COUNT="2"
-      echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}$CORE_COUNT${CL}"
-    else
-      echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}$CORE_COUNT${CL}"
     fi
+    echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}$CORE_COUNT${CL}"
   else
     exit-script
   fi
 
-  if RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 2048 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 "$RAM_SIZE" --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$RAM_SIZE" ]; then
       RAM_SIZE="2048"
-      echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}$RAM_SIZE${CL}"
-    else
-      echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}$RAM_SIZE${CL}"
     fi
+    echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}$RAM_SIZE${CL}"
   else
     exit-script
   fi
 
-  if BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Bridge" 8 58 vmbr0 --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Bridge" 8 58 "$BRG" --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$BRG" ]; then
       BRG="vmbr0"
-      echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}$BRG${CL}"
-    else
-      echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}$BRG${CL}"
     fi
+    echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}$BRG${CL}"
   else
     exit-script
   fi
 
-  if MAC1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a MAC Address" 8 58 "$GEN_MAC" --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+  if MAC1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a MAC Address" 8 58 "$MAC" --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$MAC1" ]; then
       MAC="$GEN_MAC"
       echo -e "${MACADDRESS}${BOLD}${DGN}MAC Address: ${BGN}$MAC${CL}"
@@ -376,9 +396,8 @@ function advanced_settings() {
 
   if VLAN1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a Vlan(leave blank for default)" 8 58 --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$VLAN1" ]; then
-      VLAN1="Default"
       VLAN=""
-      echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}$VLAN1${CL}"
+      echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}Default${CL}"
     else
       VLAN=",tag=$VLAN1"
       echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}$VLAN1${CL}"
@@ -389,9 +408,8 @@ function advanced_settings() {
 
   if MTU1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Interface MTU Size (leave blank for default)" 8 58 --title "MTU SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [ -z "$MTU1" ]; then
-      MTU1="Default"
       MTU=""
-      echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}$MTU1${CL}"
+      echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}Default${CL}"
     else
       MTU=",mtu=$MTU1"
       echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}$MTU1${CL}"
@@ -445,6 +463,10 @@ start_script
 
 post_to_api_vm
 
+# ===== FIX: initialize arrays/vars before use =====
+STORAGE_MENU=()
+MSG_MAX_LENGTH=0
+
 msg_info "Validating Storage"
 while read -r line; do
   TAG=$(echo "$line" | awk '{print $1}')
@@ -452,15 +474,16 @@ while read -r line; do
   FREE=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
   ITEM="  Type: $TYPE Free: $FREE "
   OFFSET=2
-  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then
+  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-0} ]]; then
     MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET))
   fi
   STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
 done < <(pvesm status -content images | awk 'NR>1')
+
 VALID=$(pvesm status -content images | awk 'NR>1')
 if [ -z "$VALID" ]; then
   msg_error "Unable to detect a valid storage location."
-  exit
+  exit 1
 elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
   STORAGE=${STORAGE_MENU[0]}
 else
@@ -471,37 +494,51 @@ else
       "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
   done
 fi
+
 msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
 msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
+
 msg_info "Retrieving the URL for the Debian 13 Qcow2 Disk Image"
 if [ "$CLOUD_INIT" == "yes" ]; then
   URL=https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
 else
   URL=https://cloud.debian.org/images/cloud/trixie/latest/debian-13-nocloud-amd64.qcow2
 fi
-sleep 2
+
+sleep 1
 msg_ok "${CL}${BL}${URL}${CL}"
+
 curl -f#SL -o "$(basename "$URL")" "$URL"
 echo -en "\e[1A\e[0K"
-FILE=$(basename $URL)
+FILE=$(basename "$URL")
 msg_ok "Downloaded ${CL}${BL}${FILE}${CL}"
 
 STORAGE_TYPE=$(pvesm status -storage "$STORAGE" | awk 'NR>1 {print $2}')
+
+# ===== FIX: pass qm importdisk args correctly (array) =====
+DISK_IMPORT_ARGS=()
+
 case $STORAGE_TYPE in
-nfs | dir)
-  DISK_EXT=".qcow2"
-  DISK_REF="$VMID/"
-  DISK_IMPORT="--format qcow2"
-  THIN=""
-  ;;
-btrfs)
-  DISK_EXT=".raw"
-  DISK_REF="$VMID/"
-  DISK_IMPORT="--format raw"
-  FORMAT=",efitype=4m"
-  THIN=""
-  ;;
+  nfs|dir)
+    DISK_EXT=".qcow2"
+    DISK_REF="$VMID/"
+    DISK_IMPORT_ARGS=(--format qcow2)
+    THIN=""
+    ;;
+  btrfs)
+    DISK_EXT=".raw"
+    DISK_REF="$VMID/"
+    DISK_IMPORT_ARGS=(--format raw)
+    FORMAT=",efitype=4m"
+    THIN=""
+    ;;
+  *)
+    DISK_EXT=""
+    DISK_REF=""
+    DISK_IMPORT_ARGS=()
+    ;;
 esac
+
 for i in {0,1}; do
   disk="DISK$i"
   eval DISK"${i}"=vm-"${VMID}"-disk-"${i}"${DISK_EXT:-}
@@ -511,8 +548,17 @@ done
 msg_info "Creating a Debian 13 VM"
 qm create "$VMID" -agent 1"${MACHINE}" -tablet 0 -localtime 1 -bios ovmf"${CPU_TYPE}" -cores "$CORE_COUNT" -memory "$RAM_SIZE" \
   -name "$HN" -tags community-script -net0 virtio,bridge="$BRG",macaddr="$MAC"$VLAN"$MTU" -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
-pvesm alloc "$STORAGE" "$VMID" "$DISK0" 4M 1>&/dev/null
-qm importdisk "$VMID" "${FILE}" "$STORAGE" "${DISK_IMPORT:-}" 1>&/dev/null
+
+# allocate EFI disk
+pvesm alloc "$STORAGE" "$VMID" "$DISK0" 4M >/dev/null
+
+# import disk (do NOT swallow errors)
+if [ ${#DISK_IMPORT_ARGS[@]} -gt 0 ]; then
+  qm importdisk "$VMID" "${FILE}" "$STORAGE" "${DISK_IMPORT_ARGS[@]}"
+else
+  qm importdisk "$VMID" "${FILE}" "$STORAGE"
+fi
+
 if [ "$CLOUD_INIT" == "yes" ]; then
   qm set "$VMID" \
     -efidisk0 "${DISK0_REF}"${FORMAT} \
@@ -527,6 +573,7 @@ else
     -boot order=scsi0 \
     -serial0 socket >/dev/null
 fi
+
 DESCRIPTION=$(
   cat <<EOF
 <div align='center'>
@@ -558,15 +605,14 @@ DESCRIPTION=$(
 EOF
 )
 qm set "$VMID" -description "$DESCRIPTION" >/dev/null
+
 if [ -n "$DISK_SIZE" ]; then
   msg_info "Resizing disk to $DISK_SIZE GB"
   qm resize "$VMID" scsi0 "${DISK_SIZE}" >/dev/null
-else
-  msg_info "Using default disk size of $DEFAULT_DISK_SIZE GB"
-  qm resize "$VMID" scsi0 "${DEFAULT_DISK_SIZE}" >/dev/null
 fi
 
 msg_ok "Created a Debian 13 VM ${CL}${BL}(${HN})"
+
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting Debian 13 VM"
   qm start "$VMID"
